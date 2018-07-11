@@ -1,3 +1,4 @@
+#define detail_log
 #define loop2
 #define dofork
 // #define dontsend
@@ -84,6 +85,7 @@ typedef struct storm_ {
 	float	rain;
 } storm_t;
 storm_t		last_storm;
+int		last_sunset;
 
 weather_data_t	weather;
 FILE		*logfile;
@@ -175,7 +177,7 @@ set_time_stamp (weather_data_t *weather, struct tm *tm)
 
 
 uchar *
-printhex (unsigned char *buf, int size) 
+printhex (unsigned char *buf, int size, int force) 
 {
     uchar *src;
     uchar *dst;
@@ -195,7 +197,7 @@ printhex (unsigned char *buf, int size)
 	    *dst = (i-10) + 'A';
     }
     *dst = '\0';
-    if (log_detail) {
+    if (log_detail || force) {
 	fprintf(logfile, "(%ld chars)='%s'\n", src - buf, buffer);
     }
 
@@ -267,7 +269,7 @@ read_controller (const char	*cmd,
 	    buf[i+1] = '\0';
 	    if (log_detail) {
 		fprintf(logfile, "nc = %d, size left = %d\n", nc, size - i);
-		printhex(buf, i);
+		printhex(buf, i, 0);
 	    }
 	    if (i >= size)
 		return i;
@@ -287,7 +289,7 @@ incr_rain_index (int index)
 
 
 void
-decode_loop (unsigned char *buffer, weather_data_t *weather) 
+decode_loop (unsigned char *buffer, weather_data_t *weather, struct tm *tm) 
 {
     uint i;
     int	year, month, day;
@@ -719,6 +721,23 @@ open_month (char *type, weather_data_t *weather, char *method) {
     return out_fd;
 }
 
+FILE *
+open_sunset (weather_data_t *weather, char *method) {
+    FILE	*out_fd;
+    static char	name[100];
+
+    snprintf(name, sizeof(name), "%s/sunset_%02d.dat",
+	     WEATHER_DIR,
+	     weather->month);
+
+    out_fd = fopen(name, method);
+    if (out_fd == NULL) {
+	fprintf(logfile, "Error opening month temp. file (%s)\n", name);
+	return NULL;
+    }
+    return out_fd;
+}
+
 void
 write_files (weather_data_t *weather) {
     FILE	*out_fd;
@@ -832,7 +851,7 @@ write_files_daily (weather_data_t *weather)
     fprintf(fd, "%d %.2f %s", low_time, low, ctime(&low_time));
     fclose(fd);
 
-/* rain accumulation */
+/* rain accumulation w/ timestamp of last accumulation read */
     fd = open_month("accum", weather, "a");
     fprintf(fd, "%.2f %.2f %s", 
 	    weather->rain_yearly,
@@ -848,20 +867,38 @@ write_files_daily (weather_data_t *weather)
     snprintf(command, sizeof(command), "gzip %s &", day_name(weather, "rain")); system(command);
     snprintf(command, sizeof(command), "gzip %s &", day_name(weather, "in")); system(command);
     snprintf(command, sizeof(command), "gzip %s &", day_name(weather, "lr")); system(command);
+    snprintf(command, sizeof(command), "gzip %s &", day_name(weather, "moisture_kitchen")); system(command);
+    snprintf(command, sizeof(command), "gzip %s &", day_name(weather, "moisture_lefler")); system(command);
 
     /* Reset our time info - absolutely necessary */
     time(&t);
     tm = localtime(&t);
     set_time_stamp(weather, tm);
 
+}
+
+
+write_sunset (weather_data_t *weather) {
+    FILE *fd;
+    time_t	t;
+    struct tm *tm;
+
+    time(&t);
+    tm = localtime(&t);
+
 /* next sunset time */
-/* Reestablish the tm structure to today - we misused it earlier */
-    fd = open_month("sunset", weather, "a");
+    if (tm->tm_mday == 1) {
+      fd = open_sunset(weather, "w"); /* recreate it */
+    } else {
+      fd = open_sunset(weather, "a");
+    }
     fprintf(fd, "%02d %02d:%02d\n", 
 	    tm->tm_mday,
 	    weather->sunset_hour,
 	    weather->sunset_min);
     fclose(fd);
+
+    last_sunset = tm->tm_mday;
 }
 
 
@@ -963,7 +1000,7 @@ write_wunderground (weather_data_t *weather, int rapid) {
 	    err = getaddrinfo("rtupdate.wunderground.com", "http", &hints, &addrinfo);
 	}
 	if (err) {
-		fprintf(logfile, "Error getting address info\n");
+		fprintf(logfile, "Error getting address info (rapid=%d)\n", rapid);
 		return(0);
 	}
 
@@ -988,8 +1025,8 @@ write_wunderground (weather_data_t *weather, int rapid) {
 	tm = gmtime(&weather->time);
 	if (!rapid) {
 	    snprintf(buf, sizeof(buf), "GET /weatherstation/updateweatherstation.php?"
-		"ID=KCALAMES14&PASSWORD=wunderrj58&"
-		"dateutc=%04d-%02d-%02d%%32%02d%%32%02d%%32%02d&"
+		"ID=KCALAMES14&PASSWORD=fd1185f7&"
+		"dateutc=%04d-%02d-%02d%%20%02d:%02d:%02d&"
 		"tempf=%.1f&humidity=%d&dewptf=%.2f&baromin=%.2f&"
 		"winddir=%d&windspeedmph=%d&"
 #ifdef loop2
@@ -1015,8 +1052,8 @@ write_wunderground (weather_data_t *weather, int rapid) {
 		);
 	} else {
 	    snprintf(buf, sizeof(buf), "GET /weatherstation/updateweatherstation.php?"
-		"ID=KCALAMES14&PASSWORD=wunderrj58&"
-		"dateutc=%04d-%02d-%02d%%32%02d%%32%02d%%32%02d&"
+		"ID=KCALAMES14&PASSWORD=wunderRj58&"
+		"dateutc=%04d-%02d-%02d%%20%02d:%02d:%02d&"
 		"tempf=%.1f&humidity=%d&dewptf=%.2f&baromin=%.2f&"
 		"winddir=%d&windspeedmph=%d&"
 #ifdef loop2
@@ -1043,7 +1080,7 @@ weather->wind_gust_10, weather->wind_gust_dir,
 		);
 	}
 #ifdef detail_log
-	time(&t2); fprintf(logfile, "  Writing URL - %s", ctime(&t2));
+	time(&t2); fprintf(logfile, "  Writing URL - %s - %s", buf, ctime(&t2));
 #endif
 	size = write(sock, buf, strlen(buf));
 	if (log_detail) {
@@ -1060,9 +1097,9 @@ weather->wind_gust_10, weather->wind_gust_dir,
 	time(&t2); fprintf(logfile, "  Reading reply - %s", ctime(&t2));
 #endif
 	while ((size = read_net(sock, buf, sizeof(buf)-1)) > 0) {
-		if (log_detail) {
+//		if (log_detail) {
 			fprintf(logfile, "%d chars='%*s'", size, size, buf);
-		}
+//		}
 	}
 
 	close(sock);
@@ -1127,13 +1164,25 @@ decr_log (int i)
 int
 change_to_rapid (weather_data_t *weather) {
 
-    if (weather->wind_speed_ave_10 > 7 ||
-	weather->wind_gust_10 > 10 ||
-	weather->rain_rate > 0.25) {
-	return (1);
-    } else {
-	return (0);
-    }
+return(0);
+
+  if (weather->wind_speed_ave_10 < 500 && weather->wind_speed_ave_10 > 7) {
+    fprintf(logfile, "Rapid mode due to wind speed (%f)\n",
+	    weather->wind_speed_ave_10);
+    return (1);
+  }
+  if (weather->wind_gust_10 > 10) {
+    fprintf(logfile, "Rapid mode due to wind gust (%f)\n",
+	    weather->wind_gust_10);
+    return (1);
+  }
+  if (weather->rain_rate > 0.25) {
+    fprintf(logfile, "Rapid mode due to rain rate (%f)\n",
+	    weather->rain_rate);
+    return (1);
+  }
+
+  return (0);
 }
 
 
@@ -1142,13 +1191,15 @@ dead_man (int it) { }
 
 
 void
-
 set_controller_time(int fd, struct tm *tm) {
   char timebuf[10];
   ushort crc;
 
   /* Issue SETTIME command and read the ACK */
+  read_controller("\n", fd, buffer, 10, 0, 0);
+  read_controller("\n", fd, buffer, 10, 0, 0);
   read_controller("SETTIME\n", fd, buffer, 1, 0, 0);
+  fprintf(logfile, "SETTIME cmd ACK of 0x%x\n", (ulong)buffer[0]);
 
   /* Encode the time */
   timebuf[0] = tm->tm_sec;
@@ -1166,8 +1217,34 @@ set_controller_time(int fd, struct tm *tm) {
 
   /* Send it */
   read_controller(timebuf, fd, buffer, 1, 0, 0);
-  if (buffer[0] != '\006' /* ACK */)
-    fprintf(logfile, "Time set ACK of 0x%x\n", (ulong)buffer[0]);
+  fprintf(logfile, "Time set ACK of 0x%x\n", (ulong)buffer[0]);
+}
+
+void
+check_controller_time(int fd, struct tm *tm) {
+  char timebuf[10];
+  static char string[100];
+  ushort crc;
+  int tries=0;
+
+  do {
+    /* Issue SETTIME command and read the ACK */
+    read_controller("\n", fd, buffer, 10, 0, 0);
+    read_controller("\n", fd, buffer, 10, 0, 0);
+    read_controller("GETTIME\n", fd, buffer, 10, 0, 0);
+  } while (buffer[0] != '\06' && ++tries < 5);
+
+  if (buffer[0] == '\06' && buffer[2] != tm->tm_min &&
+      tm->tm_sec < 45 && tm->tm_sec > 15) {
+    fprintf(logfile, "GETTIME=");
+    printhex(buffer, 9, 1);
+    fprintf(logfile, "\n");
+    fflush(logfile);
+    snprintf(string, sizeof(string), "mail -s 'weather time sync (cont=%d vs comp=%d)' raj@mischievous.us </dev/null >/dev/null 2>&1",
+	     buffer[2], tm->tm_min);
+    system(string);
+    set_controller_time(fd, tm);
+  }
 }
 
 /*
@@ -1227,6 +1304,7 @@ main (int argc, char **argv) {
     time(&t);
     tm = localtime(&t);
     last_mday = tm->tm_mday;
+    last_sunset = tm->tm_mday; // Assume we've already written this
     memset(&last_storm, 0, sizeof(last_storm));
     memset(&weather, 0, sizeof(weather));
     
@@ -1242,18 +1320,29 @@ main (int argc, char **argv) {
 
         time(&t);
 	tm = localtime(&t);
+
+	check_controller_time(fd, tm);
+
 	/*
 	 * If we just crossed midnight - write previous day's rain value
 	 */
 	//	if (tm->tm_mday != last_mday) {
-	if (log_detail > 0) {
-	  set_controller_time(fd, tm);
-	}
 	if (tm->tm_hour == 3 && tm->tm_min == 0) {
 	  set_controller_time(fd, tm);
+	}
+	if (tm->tm_hour == 0 && tm->tm_min == 0 &&
+	    tm->tm_mday != last_mday) {
 	  write_files_daily(&weather);
-	  last_mday = tm->tm_mday;
+	  last_mday = tm->tm_mday; /* record this was done for today */
 /* compress the previous day files */
+	}
+
+	/*
+	 * When we have passed 3am, write the sunset time.
+	 * (This avoids problems with daylight savings time changes.)
+	 */
+	if (tm->tm_hour == 3 && tm->tm_min < 5 && tm->tm_mday != last_sunset) {
+	    write_sunset(&weather);
 	}
 
 #ifdef detail_log
@@ -1268,7 +1357,7 @@ main (int argc, char **argv) {
 		sleep(10);
 		continue; /* error in the packet somewhere */
 	}
-	decode_loop(&buffer[1], &weather);
+	decode_loop(&buffer[1], &weather, tm);
 
 #ifdef loop2
 	read_controller("\n", fd, buffer, 2, 0, 0);
